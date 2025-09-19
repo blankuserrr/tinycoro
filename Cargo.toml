@@ -15,16 +15,16 @@ categories = [
 "no-std::no-alloc"
 ]
 exclude = [
-".gitmodules",
-"target/**/*",
-"*.tmp",
-"*.bak",
-"vendor/minicoro/.github/**/*",
-"vendor/minicoro/tests/**/*",
-"vendor/minicoro/LICENSE",
-"vendor/minicoro/README.md"
+  ".gitmodules",
+  "target/**/*",
+  "*.tmp",
+  "*.bak",
+  "vendor/minicoro/.github/**/*",
+  "vendor/minicoro/tests/**/*",
+  "vendor/minicoro/README.md",
+  "Cargo.toml.orig",
+  "Cargo.lock"
 ]
-
 
 [dependencies.thiserror]
 version = "2.0.16"
