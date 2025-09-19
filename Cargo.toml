@@ -15,11 +15,14 @@ categories = [
 "no-std::no-alloc"
 ]
 exclude = [
-    "vendor/**/*",
-    ".gitmodules",
-    "target/**/*",
-    "*.tmp",
-    "*.bak"
+".gitmodules",
+"target/**/*",
+"*.tmp",
+"*.bak",
+"vendor/minicoro/.github/**/*",
+"vendor/minicoro/tests/**/*",
+"vendor/minicoro/LICENSE",
+"vendor/minicoro/README.md"
 ]
 
 

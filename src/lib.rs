@@ -14,7 +14,7 @@ mod ffi {
     #![allow(non_camel_case_types)]
     #![allow(non_snake_case)]
     #![allow(dead_code)]
-    
+
     include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
 }
 
@@ -46,7 +46,7 @@ impl Coroutine {
     ) -> Result<Self, CoroutineError> {
         let desc = unsafe { ffi::mco_desc_init(Some(func), stack_size) };
         let mut co: *mut ffi::mco_coro = ptr::null_mut();
-        
+
         let result = unsafe { ffi::mco_create(&raw mut co, (&raw const desc).cast_mut()) };
         if result == ffi::mco_result_MCO_SUCCESS {
             Ok(Coroutine { inner: co })
@@ -228,19 +228,13 @@ impl CoroutineError {
             _ => CoroutineError::Unknown,
         }
     }
-
 }
-
 
 /// Get the currently running coroutine (if any)
 #[must_use]
 pub fn running() -> Option<*mut ffi::mco_coro> {
     let co = unsafe { ffi::mco_running() };
-    if co.is_null() {
-        None
-    } else {
-        Some(co)
-    }
+    if co.is_null() { None } else { Some(co) }
 }
 
 /// Yield the current coroutine (safe version)

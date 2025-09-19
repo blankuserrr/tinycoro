@@ -1,4 +1,4 @@
-fn main(){
+fn main() {
     // Build the C library
     cc::Build::new()
         .file("minicoro.c")
