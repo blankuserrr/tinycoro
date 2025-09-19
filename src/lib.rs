@@ -1,105 +1,276 @@
-// In a file like `src/sys.rs` or inside a `mod sys { ... }` block.
+//! Rust bindings for the minicoro library
+//!
+//! This crate provides safe and unsafe bindings to minicoro, a minimal asymmetric
+//! stackful cross-platform coroutine library in pure C.
 
-#![allow(non_camel_case_types)] // This one is okay for FFI types.
+#![no_std]
+#![allow(non_upper_case_globals)]
+#![allow(non_camel_case_types)]
+#![allow(non_snake_case)]
 
-use core::ffi::{c_char, c_void}; // Use standard C types
+// Include the generated bindings
+include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
 
-pub const MCO_DEFAULT_STORAGE_SIZE: usize = 1024;
-pub const MCO_MIN_STACK_SIZE: usize = 32768;
-pub const MCO_DEFAULT_STACK_SIZE: usize = 57344;
+use core::ptr;
+use thiserror::Error;
 
-#[repr(C)]
-#[derive(Debug)] // Add Debug for easy printing
-pub struct mco_coro {
-    _opaque: [u8; 0],
-    _marker: core::marker::PhantomData<(*mut u8, core::marker::PhantomPinned)>,
+/// A safe wrapper around a minicoro coroutine
+pub struct Coroutine {
+    inner: *mut mco_coro,
 }
 
-#[repr(C)]
+impl Coroutine {
+    /// Create a new coroutine with the given function and stack size
+    ///
+    /// # Safety
+    ///
+    /// The function pointer must be valid and safe to call
+    ///
+    /// # Errors
+    ///
+    /// Returns `CoroutineError` if coroutine creation fails
+    pub unsafe fn new(
+        func: unsafe extern "C" fn(*mut mco_coro),
+        stack_size: usize,
+    ) -> Result<Self, CoroutineError> {
+        let desc = unsafe { mco_desc_init(Some(func), stack_size) };
+        let mut co: *mut mco_coro = ptr::null_mut();
+        
+        let result = unsafe { mco_create(&raw mut co, (&raw const desc).cast_mut()) };
+        if result == mco_result_MCO_SUCCESS {
+            Ok(Coroutine { inner: co })
+        } else {
+            Err(CoroutineError::from_raw(result))
+        }
+    }
+
+    /// Resume the coroutine
+    ///
+    /// # Errors
+    ///
+    /// Returns `CoroutineError` if resuming the coroutine fails
+    pub fn resume(&mut self) -> Result<(), CoroutineError> {
+        let result = unsafe { mco_resume(self.inner) };
+        if result == mco_result_MCO_SUCCESS {
+            Ok(())
+        } else {
+            Err(CoroutineError::from_raw(result))
+        }
+    }
+
+    /// Yield the coroutine (call from within coroutine)
+    ///
+    /// # Errors
+    ///
+    /// Returns `CoroutineError` if yielding the coroutine fails
+    pub fn yield_now(&mut self) -> Result<(), CoroutineError> {
+        let result = unsafe { mco_yield(self.inner) };
+        if result == mco_result_MCO_SUCCESS {
+            Ok(())
+        } else {
+            Err(CoroutineError::from_raw(result))
+        }
+    }
+
+    /// Get the status of the coroutine
+    #[must_use]
+    pub fn status(&self) -> CoroutineState {
+        let state = unsafe { mco_status(self.inner) };
+        CoroutineState::from_raw(state)
+    }
+
+    /// Push data to the coroutine storage
+    ///
+    /// # Errors
+    ///
+    /// Returns `CoroutineError` if pushing data fails
+    pub fn push<T>(&mut self, data: &T) -> Result<(), CoroutineError> {
+        let result = unsafe {
+            mco_push(
+                self.inner,
+                core::ptr::from_ref::<T>(data).cast::<core::ffi::c_void>(),
+                core::mem::size_of::<T>(),
+            )
+        };
+        if result == mco_result_MCO_SUCCESS {
+            Ok(())
+        } else {
+            Err(CoroutineError::from_raw(result))
+        }
+    }
+
+    /// Pop data from the coroutine storage
+    ///
+    /// # Errors
+    ///
+    /// Returns `CoroutineError` if popping data fails
+    pub fn pop<T>(&mut self) -> Result<T, CoroutineError> {
+        let mut data = core::mem::MaybeUninit::<T>::uninit();
+        let result = unsafe {
+            mco_pop(
+                self.inner,
+                data.as_mut_ptr().cast::<core::ffi::c_void>(),
+                core::mem::size_of::<T>(),
+            )
+        };
+        if result == mco_result_MCO_SUCCESS {
+            Ok(unsafe { data.assume_init() })
+        } else {
+            Err(CoroutineError::from_raw(result))
+        }
+    }
+
+    /// Get the number of bytes stored in the coroutine storage
+    #[must_use]
+    pub fn bytes_stored(&self) -> usize {
+        unsafe { mco_get_bytes_stored(self.inner) }
+    }
+
+    /// Get the total storage size
+    #[must_use]
+    pub fn storage_size(&self) -> usize {
+        unsafe { mco_get_storage_size(self.inner) }
+    }
+}
+
+impl Drop for Coroutine {
+    fn drop(&mut self) {
+        if !self.inner.is_null() {
+            unsafe {
+                mco_destroy(self.inner);
+            }
+        }
+    }
+}
+
+unsafe impl Send for Coroutine {}
+
+/// Safe wrapper for coroutine states
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum mco_result {
-    MCO_SUCCESS = 0,
-    MCO_GENERIC_ERROR,
-    MCO_INVALID_POINTER,
-    MCO_INVALID_COROUTINE,
-    MCO_NOT_SUSPENDED,
-    MCO_NOT_RUNNING,
-    MCO_MAKE_CONTEXT_ERROR,
-    MCO_SWITCH_CONTEXT_ERROR,
-    MCO_NOT_ENOUGH_SPACE,
-    MCO_OUT_OF_MEMORY,
-    MCO_INVALID_ARGUMENTS,
-    MCO_INVALID_OPERATION,
-    MCO_STACK_OVERFLOW,
+pub enum CoroutineState {
+    Dead,
+    Normal,
+    Running,
+    Suspended,
 }
 
-#[repr(C)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum mco_state {
-    MCO_DEAD = 0,
-    MCO_NORMAL,
-    MCO_RUNNING,
-    MCO_SUSPENDED,
+impl CoroutineState {
+    fn from_raw(state: mco_state) -> Self {
+        match state {
+            mco_state_MCO_NORMAL => CoroutineState::Normal,
+            mco_state_MCO_RUNNING => CoroutineState::Running,
+            mco_state_MCO_SUSPENDED => CoroutineState::Suspended,
+            _ => CoroutineState::Dead, // fallback for MCO_DEAD and unknown states
+        }
+    }
 }
 
-#[repr(C)]
-pub struct mco_desc {
-    // Correctly use extern "C" for function pointers in FFI structs
-    pub func: Option<unsafe extern "C" fn(co: *mut mco_coro)>,
-    pub user_data: *mut c_void,
-    pub malloc_cb: Option<unsafe extern "C" fn(size: usize, allocator_data: *mut c_void) -> *mut c_void>,
-    pub free_cb: Option<unsafe extern "C" fn(ptr: *mut c_void, allocator_data: *mut c_void)>,
-    pub allocator_data: *mut c_void,
-    pub storage_size: usize,
-    pub coro_size: usize,
-    pub stack_size: usize,
+/// Safe wrapper for coroutine errors
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+pub enum CoroutineError {
+    #[error("No error")]
+    Success,
+    #[error("Generic error")]
+    GenericError,
+    #[error("Invalid pointer")]
+    InvalidPointer,
+    #[error("Invalid coroutine")]
+    InvalidCoroutine,
+    #[error("Coroutine not suspended")]
+    NotSuspended,
+    #[error("Coroutine not running")]
+    NotRunning,
+    #[error("Make context error")]
+    MakeContextError,
+    #[error("Switch context error")]
+    SwitchContextError,
+    #[error("Not enough space")]
+    NotEnoughSpace,
+    #[error("Out of memory")]
+    OutOfMemory,
+    #[error("Invalid arguments")]
+    InvalidArguments,
+    #[error("Invalid operation")]
+    InvalidOperation,
+    #[error("Stack overflow")]
+    StackOverflow,
+    #[error("Unknown error")]
+    Unknown,
 }
 
-// All pointers passed to C should be *mut if C might modify the pointed-to data,
-// even if the function signature is `const`. This is a common C pattern that's
-// tricky for Rust. We'll treat `mco_coro` as mutable internally.
-#[link(name = "minicoro", kind = "static")]
-unsafe extern "C" {
-    // This function doesn't exist in minicoro.h, let's use the one that does: mco_init_desc
-    // pub fn mco_desc_init(func: unsafe extern "C" fn(co: *mut mco_coro), stack_size: usize) -> mco_desc;
-    pub fn mco_create(out_co: *mut *mut mco_coro, desc: *const mco_desc) -> mco_result;
-    pub fn mco_destroy(co: *mut mco_coro) -> mco_result;
-    pub fn mco_resume(co: *mut mco_coro) -> mco_result;
-    pub fn mco_yield(co: *mut mco_coro) -> mco_result;
-    pub fn mco_status(co: *mut mco_coro) -> mco_state;
-    pub fn mco_get_user_data(co: *mut mco_coro) -> *mut c_void;
-    pub fn mco_push(co: *mut mco_coro, src: *const c_void, len: usize) -> mco_result;
-    pub fn mco_pop(co: *mut mco_coro, dest: *mut c_void, len: usize) -> mco_result;
-    pub fn mco_peek(co: *mut mco_coro, dest: *mut c_void, len: usize) -> mco_result;
-    pub fn mco_get_bytes_stored(co: *mut mco_coro) -> usize;
-    pub fn mco_get_storage_size(co: *mut mco_coro) -> usize;
-    pub fn mco_running() -> *mut mco_coro;
-    pub fn mco_result_description(res: mco_result) -> *const c_char;
+impl CoroutineError {
+    fn from_raw(result: mco_result) -> Self {
+        match result {
+            mco_result_MCO_SUCCESS => CoroutineError::Success,
+            mco_result_MCO_GENERIC_ERROR => CoroutineError::GenericError,
+            mco_result_MCO_INVALID_POINTER => CoroutineError::InvalidPointer,
+            mco_result_MCO_INVALID_COROUTINE => CoroutineError::InvalidCoroutine,
+            mco_result_MCO_NOT_SUSPENDED => CoroutineError::NotSuspended,
+            mco_result_MCO_NOT_RUNNING => CoroutineError::NotRunning,
+            mco_result_MCO_MAKE_CONTEXT_ERROR => CoroutineError::MakeContextError,
+            mco_result_MCO_SWITCH_CONTEXT_ERROR => CoroutineError::SwitchContextError,
+            mco_result_MCO_NOT_ENOUGH_SPACE => CoroutineError::NotEnoughSpace,
+            mco_result_MCO_OUT_OF_MEMORY => CoroutineError::OutOfMemory,
+            mco_result_MCO_INVALID_ARGUMENTS => CoroutineError::InvalidArguments,
+            mco_result_MCO_INVALID_OPERATION => CoroutineError::InvalidOperation,
+            mco_result_MCO_STACK_OVERFLOW => CoroutineError::StackOverflow,
+            _ => CoroutineError::Unknown,
+        }
+    }
+
 }
 
-/// Initialize a coroutine descriptor with the given function and stack size.
+
+/// Get the currently running coroutine (if any)
+#[must_use]
+pub fn running() -> Option<*mut mco_coro> {
+    let co = unsafe { mco_running() };
+    if co.is_null() {
+        None
+    } else {
+        Some(co)
+    }
+}
+
+/// Yield the current coroutine (safe version)
+///
+/// This function can be safely called from within a coroutine context.
+/// It automatically detects if called from within a coroutine and yields appropriately.
+///
+/// # Errors
+///
+/// Returns `CoroutineError` if yielding fails or if not called from within a coroutine
+pub fn yield_current() -> Result<(), CoroutineError> {
+    if let Some(co) = running() {
+        let result = unsafe { mco_yield(co) };
+        if result == mco_result_MCO_SUCCESS {
+            Ok(())
+        } else {
+            Err(CoroutineError::from_raw(result))
+        }
+    } else {
+        Err(CoroutineError::InvalidCoroutine)
+    }
+}
+
+/// Yield the current coroutine (unsafe version for advanced use)
 ///
 /// # Safety
 ///
-/// This function is unsafe because:
-/// - The `func` parameter must be a valid function pointer that can safely handle
-///   the coroutine lifecycle and properly manage the coroutine's execution context
-/// - The caller must ensure that `func` does not perform undefined behavior when
-///   called with a valid `mco_coro` pointer
-/// - The `stack_size` should be large enough to accommodate the coroutine's
-///   execution needs (at least `MCO_MIN_STACK_SIZE`)
-pub unsafe fn mco_init_desc(
-    func: unsafe extern "C" fn(co: *mut mco_coro),
-    stack_size: usize
-) -> mco_desc {
-    mco_desc {
-        func: Some(func),
-        user_data: core::ptr::null_mut(),
-        malloc_cb: None,
-        free_cb: None,
-        allocator_data: core::ptr::null_mut(),
-        storage_size: 0,
-        coro_size: 0,
-        stack_size,
+/// This must be called from within a coroutine context
+///
+/// # Errors
+///
+/// Returns `CoroutineError` if yielding fails or if not called from within a coroutine
+pub unsafe fn yield_current_unsafe() -> Result<(), CoroutineError> {
+    if let Some(co) = running() {
+        let result = unsafe { mco_yield(co) };
+        if result == mco_result_MCO_SUCCESS {
+            Ok(())
+        } else {
+            Err(CoroutineError::from_raw(result))
+        }
+    } else {
+        Err(CoroutineError::InvalidCoroutine)
     }
 }
