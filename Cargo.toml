@@ -14,6 +14,13 @@ categories = [
 "no-std",
 "no-std::no-alloc"
 ]
+exclude = [
+    "vendor/**/*",
+    ".gitmodules",
+    "target/**/*",
+    "*.tmp",
+    "*.bak"
+]
 
 
 [dependencies.thiserror]
