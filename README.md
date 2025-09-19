@@ -1,3 +1,2 @@
-# minicoro-sys
-rust binding to minicoro library
-
+# Tinycoro
+Enhanced rust binding to the [minicoro](https://github.com/edubart/minicoro) library
